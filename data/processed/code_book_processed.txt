@@ -1,0 +1,16 @@
+Code book for preprocessed data set
+
+- bhk: Number of Bedrooms, Hall, Kitchen.	
+- rent: Rent of the Houses/Apartments/Flats.	
+- size: Size of the Houses/Apartments/Flats in Square Feet.	
+- floor: Houses/Apartments/Flats situated in which Floor	
+- area_type: Size of the Houses/Apartments/Flats calculated on either Super Area or Carpet Area or Build Area.	
+- city: City where the Houses/Apartments/Flats are Located.	
+- furnishing_status: Furnishing Status of the Houses/Apartments/Flats, either it is Furnished or Semi-Furnished or Unfurnished.	
+- tenant_preferred: Type of Tenant Preferred by the Owner or Agent.	
+- bathroom: Number of Bathrooms.	
+- point_of_contact: Whom should you contact for more information regarding the Houses/Apartments/Flats.	
+- total_floor: Total number of floors of the building.
+
+
+Data citation: https://www.kaggle.com/datasets/iamsouravbanerjee/house-rent-prediction-dataset

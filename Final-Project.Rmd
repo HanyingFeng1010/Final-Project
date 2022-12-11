@@ -1,0 +1,687 @@
+---
+title: "House Rent Prediction"
+author: "Hanying Feng"
+date: "2022-12-11"
+output:
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE) 
+```
+
+## Introduction
+
+The house rent can be influenced by many different factors. For example, house rent may grow as the growth of people's income.  By predicting the house rent, people can make better decision when they are renting house. It can also help the landlords to evaluate their own house and decide the price when they are renting out. House rent is very important to a society and people's life. What's more, the variation of rent can represent the local economy status. In this final project, we will predict the house rent and analyze what factors influence the rent the most.
+
+```{r echo=FALSE, out.width = "30%", fig.align = "center"}
+knitr::include_graphics("rent_pic.jpeg")
+```
+
+
+## Loading Data and Packages
+
+```{r}
+# load packages
+library(stringr)
+library(ggplot2)
+library(corrplot)
+library(tidyverse)
+library(tidymodels)
+library(randomForest)
+library(rpart.plot)
+library(vip)
+library(ranger)
+library(xgboost)
+library(janitor)
+library(glmnet)
+library(RColorBrewer)
+```
+
+The house rent data I used is the housing data in India. It includes over 4700 housing data from 6 different cities in India. This is a data set from Kaggle, and we can download it through the link https://www.kaggle.com/datasets/iamsouravbanerjee/house-rent-prediction-dataset.
+```{r}
+# load data
+rent <- read.csv("House_Rent_Dataset.csv")
+head(rent)
+```
+```{r}
+# show columns
+names(rent)
+```
+
+We can see that there are 12 columns in the rent data. The interpretations of each columns are at the following:
+
+- Posted On: The date that the house is posted on the website.
+- BHK: Number of Bedrooms, Hall, Kitchen.
+- Rent: Rent of the Houses/Apartments/Flats.
+- Size: Size of the Houses/Apartments/Flats in Square Feet.
+- Floor: Houses/Apartments/Flats situated in which Floor and Total Number of Floors (Example: Ground out of 2, 3 out of 5, etc.)
+- Area Type: Size of the Houses/Apartments/Flats calculated on either Super Area or Carpet Area or Build Area.
+- Area Locality: Locality of the Houses/Apartments/Flats.
+- City: City where the Houses/Apartments/Flats are Located.
+- Furnishing Status: Furnishing Status of the Houses/Apartments/Flats, either it is Furnished or Semi-Furnished or Unfurnished.
+- Tenant Preferred: Type of Tenant Preferred by the Owner or Agent.
+- Bathroom: Number of Bathrooms.
+- Point of Contact: Whom should you contact for more information regarding the Houses/Apartments/Flats.
+
+There are 4746 houses information collected in the data set. The maximum of rent is 3500000 (which is obviously an outlier) and the minimum of rent is 1200. The median is 16000 and the mean is 34993. The median of house size is 850 square feet and the mean of house size is 967.5 square feet.
+
+```{r}
+# data summary
+summary(rent)
+```
+
+We can see that there is no missing data in the data set. Great! We will continue preprocessing and exploring the data.
+```{r}
+# show na data
+sum(is.na(rent))
+```
+
+
+
+## Data Cleaning
+
+As we scan through the data set, we can see that there are too many categories in the column `Area.Locality`. Also since the posted date of the house cannot tell us any useful information about the house itself, we will drop the column `Area.Locality` and `Posted.On` before we construct the model.
+
+```{r}
+# drop Posted.On and Area.Locality
+rent <- select(rent, -Posted.On)
+rent <- select(rent, -Area.Locality)
+```
+
+What's more, we will extract the information of total number of floors from the column `Floor`. If there is no information about total floor of a certain house, we will assume the number of floor where the house locates is the total number of floors. After extracting the data, we will add a column named `TotalFloor` to the data set.
+
+```{r}
+rent_data <- rent
+floor_data <- rent_data$Floor
+rent_data$TotalFloor <- c()  # Create a new column for total floor
+# Extract data for number of floor and total number of floor
+for (i in 1:length(floor_data)){
+  if (grepl("out of", floor_data[i])){
+    after_split <- str_split(floor_data[i], " out of ")
+    rent_data$TotalFloor[i] <- as.numeric(after_split[[1]][2])
+    fl <- after_split[[1]][1]
+    if (grepl("Ground", fl)){
+      rent_data$Floor[i] <- 0
+    } else if (grepl("Basement", fl)){
+      rent_data$Floor[i] <- -1
+    } else {
+      rent_data$Floor[i] <- as.numeric(fl)
+    }
+  } else {
+    if (grepl("Ground", floor_data[i])){
+      rent_data$Floor[i] <- 0
+      rent_data$TotalFloor[i] <- 0
+    } else {
+      rent_data$TotalFloor[i] <- as.numeric(floor_data[i])
+    }
+  }
+}
+rent_data$Floor <- as.numeric(rent_data$Floor)
+```
+
+Now we use `clean_names` function to make the column names more organized for the future models construction.
+```{r}
+rent_data <- clean_names(rent_data)
+```
+
+We will use the following data set when we build the models.
+```{r}
+head(rent_data)
+```
+
+The followings are the parameters in the data set that will be used to train models. When we generate training data, we will drop `rent`. Therefore, there will be 10 predictors in our model.
+```{r}
+names(rent_data)
+```
+
+
+
+## Exploratory Data Analysis
+
+We first draw a correlation matrix of all the numeric data in the data set. We can see that there are strong positive relationships between `size` and `bhk`, `bathroom` and `bhk`,  and `total_floor` and `floor`. All these relationships make sense since if a house has more bathrooms, hall, and kitchen, it is more likely to have larger size. Also if the number of floor where the house locates is larger, then the total number of floors of that building should be at least the number of floor. There is also a relatively positive relationship between `rent` and `bathroom`. If a house has more bathrooms, it is reasonable for the house to have higher rent.
+
+```{r}
+cor_rent <- rent_data %>%
+  dplyr::select(is.numeric) %>%
+  cor() %>%
+  corrplot(method = "circle")
+```
+
+We can see that the number of floors and total number of floors of the building have the similar distribution. Majority of the houses locates lower than 5 floors, and majority of the total number of floors are less than 10.
+```{r}
+p1 <- ggplot(rent_data, aes(x = floor)) +
+  geom_histogram(bins = 50, color="white", fill="lightblue")
+p2 <- ggplot(rent_data, aes(x = total_floor)) +
+  geom_histogram(bins = 50, color="white", fill="lightblue")
+
+library(patchwork)
+
+p1 / p2
+```
+
+All the houses have at least 1 and at most 6 bedrooms/hall/kitchen. More than 2000 houses in the data set have 2 bedrooms/hall/kitchen, which is the most.
+```{r}
+BHK <- as.factor(rent_data$bhk)
+BHK <- as.data.frame(BHK)
+ggplot(BHK, aes(x = BHK)) +
+  geom_bar(aes(fill = BHK), color="white") +
+  scale_fill_brewer(palette = 1)
+```
+
+The distribution of house size is right skewed. Most of the houses have size less than 2000 square feet.
+```{r}
+ggplot(rent_data, aes(x = size)) +
+  geom_histogram(aes(fill = size), color="white", fill="lightblue")
+```
+
+There are three categories in the parameter `area_type`. "Carpet Area" and "Super Area" have similar number of counts, and only a very small number of houses have "Built Area". Since "Built Area" has too little data in this data set, we will drop the houses with this category in the data before we train the model.
+```{r}
+ggplot(rent_data, aes(x = area_type)) +
+  geom_bar(aes(fill = area_type), color="white") +
+  scale_fill_brewer(palette = 1)
+```
+
+There are six different cities in the data set. Among the cities, the housing data collected from Mumbai is the most.
+```{r}
+ggplot(rent_data, aes(x = city)) +
+  geom_bar(aes(fill = city), color="white") +
+  scale_fill_brewer(palette = 1)
+```
+
+There are three categories in the parameter `furnishing_status`. More houses are "semi-furnished", and fewer houses are "furnished".
+```{r}
+ggplot(rent_data, aes(x = furnishing_status)) +
+  geom_bar(aes(fill = furnishing_status), color="white") +
+  scale_fill_brewer(palette = 1)
+```
+
+
+There are three categories in the parameter `tennant_preferred`. Most of the tenants preferred both bachelors and family, and less than 1000 tenants preferred bachelors only, and less than 500 tenants preferred family only.
+```{r}
+ggplot(rent_data, aes(x = tenant_preferred)) +
+  geom_bar(aes(fill = tenant_preferred), color="white") +
+  scale_fill_brewer(palette = 1)
+```
+
+There are three categories in the parameter `point_of_contact`. Over 3000 houses have "Contact Owner", and around 1500 houses have "Contact Agent". We can see that there are only very few houses have "Contact Builder". Therefore, we will also drop the houses with "Contact Builder" before we train the model.
+```{r}
+ggplot(rent_data, aes(x = point_of_contact)) +
+  geom_bar(aes(fill = point_of_contact), color="white") +
+  scale_fill_brewer(palette = 1)
+```
+
+Now we use box plot to visualize the range of the parameter `rent`. We can notice that there are many outliers in the data, and the maximum of rent is much higher than all the other rent.
+```{r}
+ggplot(rent_data, aes(x = rent)) +
+  geom_boxplot(aes(fill = rent), fill="lightblue")
+```
+ 
+ In order to avoid the interference of these outliers, we will drop them.
+```{r}
+# Drop outliers
+Q <- quantile(rent_data$rent, probs=c(.25, .75), na.rm = FALSE)
+iqr <- IQR(rent_data$rent)
+up <-  Q[2]+1.5*iqr
+low<- Q[1]-1.5*iqr
+
+rent_data_new <- subset(rent_data, rent_data$rent > (Q[1] - 1.5*iqr) & rent_data$rent < (Q[2]+1.5*iqr))
+```
+
+We also drop the "Built Area" in `area_type` and "Contact Builder" in `point_of_contact`.
+```{r}
+# Drop the "Built Area" in `area_type` and "Contact Builder" in `point_of_contact`
+rent_data_new <- subset(rent_data_new, rent_data_new$area_type != 'Built Area')
+rent_data_new <- subset(rent_data_new, rent_data_new$point_of_contact != 'Contact Builder')
+
+rent_data <- rent_data_new
+write.csv(rent_data, "/Users/hanyingfeng/Desktop/UCSB/2022 Fall/PSTAT 131/Project/preprocessed_data.csv")
+```
+
+After dropping the outliers, the range of `rent` is [1200, 67000], and we have 4223 housing data that will be used for model training.
+```{r}
+summary(rent_data)
+```
+
+We now use box plot to visualize `rent` again. Without the outliers, we can better analyze the relationship between different categories in some parameters and rent.
+```{r}
+ggplot(rent_data, aes(x = rent)) +
+  geom_boxplot(aes(fill = rent), fill="lightblue")
+```
+
+We can see that generally the house rent increases as the increases of number of bedrooms/hall/kitchen. This makes sense since the house with more bedrooms/hall/kitchen should have larger size, and then should have higher rent.
+```{r}
+BHK <- as.factor(rent_data$bhk)
+BHK <- as.data.frame(BHK)
+BHK$rent <- rent_data$rent
+ggplot(BHK, aes(x = BHK, rent)) +
+  geom_boxplot(aes(fill = BHK)) +
+  scale_fill_brewer(palette = 1)
+```
+
+We can notice that the house rent in Mumbai is generally much higher than the rent in any other five cities in our data set. Since Mumbai is a very large city with the most population in India, it is reasonable to have higher rent for the houses in this city.
+```{r}
+ggplot(rent_data, aes(x = city, rent)) +
+  geom_boxplot(aes(fill = city)) +
+  scale_fill_brewer(palette = 1)
+```
+
+We now plot box plots for house size in different cities. We can see that there is no obvious difference between the size in theses six cities.
+```{r}
+ggplot(rent_data, aes(x = city, size)) +
+  geom_boxplot(aes(fill = city)) +
+  scale_fill_brewer(palette = 1)
+```
+
+The houses with "Carpet Area" in `area_type` usually have higher rent.
+```{r}
+ggplot(rent_data, aes(x = area_type, rent)) +
+  geom_boxplot(aes(fill = area_type)) +
+  scale_fill_brewer(palette = 1)
+```
+
+We can notice that the "Furnished" houses generally have the highest rent, and then the "semi-furnished" houses, and the houses which are "unfurnished" are the cheapest. This is very reasonable.
+```{r}
+ggplot(rent_data, aes(x = furnishing_status, rent)) +
+  geom_boxplot(aes(fill = furnishing_status)) +
+  scale_fill_brewer(palette = 1)
+```
+
+The houses that the tenants preferred both "bachelors/family" may have lower rent.
+```{r}
+ggplot(rent_data, aes(x = tenant_preferred, rent)) +
+  geom_boxplot(aes(fill = tenant_preferred)) +
+  scale_fill_brewer(palette = 1)
+```
+
+We can see that the houses have "Contact Agent" are usually have much higher rent than the houses have "Contact Owner".
+```{r}
+ggplot(rent_data, aes(x = point_of_contact, rent)) +
+  geom_boxplot(aes(fill = point_of_contact)) +
+  scale_fill_brewer(palette = 1)
+```
+
+## Model Training
+
+Now we start to build and train models. I will use five models to predict the house rent: XGBoost Regression, Decision Tree Regression, Ridge Regression, Random Forest, and Lasso Regression. I will take the following steps to build the models.
+
+1. Split the data into training and testing set. We will use 70% of data as training set and 30% of data as testing set. We stratify the data based on `rent`.
+```{r}
+set.seed(3440)
+
+# split data
+rent_split <- initial_split(rent_data, prop = 0.70, strata = rent)
+rent_train <- training(rent_split)
+rent_test <- testing(rent_split)
+```
+
+2. Create a 10-fold cross validation and repeat for 3 times. We stratify the data based on `rent`.
+```{r}
+# create folds
+rent_fold <- vfold_cv(rent_train, v = 10, repeats = 3, strata = rent)
+```
+
+3. Create a recipe. We will dummy all the categorical parameters and normalize all the predictors.
+```{r}
+# create recipe
+rent_recipe <- recipe(rent ~ ., data = rent_train) %>% 
+  step_dummy(all_nominal_predictors()) %>%
+  step_center() %>%
+  step_scale()
+
+rent_recipe
+```
+
+4. Set up a model.
+
+5. Create a workflow with the information of recipe and model.
+
+6. Create a grid for model tuning.
+
+7. Fit the model.
+
+The steps from 4 to 7 will be repeated for the five different models in this project.
+
+Since some models took a long time for training, I have saved the training data for all models and will load them here. Thus, we can avoid for a long time training when we knit the file.
+```{r}
+load("Model_Result/xgboost_tune_res.rda")
+load("Model_Result/lasso_tune_res.rda")
+load("Model_Result/ridge_tune_res.rda")
+load("Model_Result/rf_tune_res.rda")
+load("Model_Result/reg_tree_tune_res.rda")
+```
+
+## XGBoost Regression
+
+We first fit the XGBoost Regression. We will tune the hyperparameter `trees` and `learn_rate` in range c(10, 2000) and c(-5, -0.2) respectively with 10 levels.
+
+```{r, eval = FALSE}
+xgboost_spec <- boost_tree(trees = tune(), learn_rate = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+xgboost_wf <- workflow() %>% 
+  add_recipe(rent_recipe) %>% 
+  add_model(xgboost_spec)
+
+xgboost_grid <- grid_regular(trees(range = c(10, 2000)), learn_rate(range = c(-5, 0.2)), levels = 10)
+
+xgboost_tune_res = tune_grid(
+  xgboost_wf,
+  resamples = rent_fold, 
+  grid = xgboost_grid
+)
+```
+
+
+We can see that the rmse doesn't change much as the number of trees increases when the learning rate is either too small or too large, and the rmse decreases as the number of trees increases when the learning rate is between 0.0001 and 0.1. The r-square generally doesn't change a lot as the number of trees increases, and the r-square is higher when the learning rate is around 0.002 to 0.029.
+```{r}
+autoplot(xgboost_tune_res)
+```
+
+The XGBoost Regression has the lowest rmse = 7025.180 when there are 231 trees with learning rate = 0.029286446.
+```{r}
+xgboost_metrics <- collect_metrics(xgboost_tune_res) %>%
+  filter(.metric=='rmse') %>%
+  arrange(mean) %>% 
+  head()
+xgboost_metrics
+```
+
+The XGBoost Regression has the highest r-square = 0.7371747 when there are 231 trees with learning rate = 0.029286446.
+```{r}
+xgboost_metrics_rsq <- collect_metrics(xgboost_tune_res) %>%
+  filter(.metric=='rsq') %>%
+  arrange(desc(mean)) %>% 
+  head()
+xgboost_metrics_rsq
+```
+
+## Decision Tree Regression
+
+Now we fit the Decision Tree Regression. We will tune the hyperparameter `cost_complexity` in range c(-4, -1) with 10 levels.
+
+```{r, eval = FALSE}
+reg_tree_spec <- decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+reg_tree_wf <- workflow() %>%
+  add_model(reg_tree_spec) %>%
+  add_recipe(rent_recipe)
+
+reg_tree_grid <- grid_regular(cost_complexity(range = c(-4, -1)), levels = 10)
+
+reg_tree_tune_res <- tune_grid(
+  reg_tree_wf, 
+  resamples = rent_fold, 
+  grid = reg_tree_grid
+)
+```
+
+We can see that the both rmse and r-square don't change too much at the beginning when cost-complexity increases. When cost-complexity becomes larger than 1e-03, rmse increases as the cost-complexity increases, and r-square decreases as the cost-complexity decreases.
+
+```{r}
+autoplot(reg_tree_tune_res)
+```
+
+The Decision Tree Regression has the lowest rmse = 7694.215 when the cost-complexity is 0.0004641589.
+```{r}
+reg_tree_metrics <- collect_metrics(reg_tree_tune_res) %>%
+  filter(.metric=='rmse') %>%
+  arrange(mean) %>% 
+  head()
+reg_tree_metrics
+```
+
+The Decision Tree Regression has the highest r-square = 0.6888815 when the cost-complexity is 0.0004641589.
+```{r}
+reg_tree_metrics_rsq <- collect_metrics(reg_tree_tune_res) %>%
+  filter(.metric=='rsq') %>%
+  arrange(desc(mean)) %>% 
+  head()
+reg_tree_metrics_rsq
+```
+
+
+
+## Ridge Regression
+
+Then we fit the Ridge Regression. We will tune the hyperparameter `penalty` in range c(-5, 5) with 10 levels. In order to construct Ridge Regression, we set `mixture` = 0.
+```{r, eval = FALSE}
+ridge_spec <- linear_reg(penalty = tune(), mixture = 0) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+
+ridge_wf <- workflow() %>% 
+  add_recipe(rent_recipe) %>% 
+  add_model(ridge_spec)
+
+ridge_grid <- grid_regular(penalty(range = c(-5, 5)), levels = 10)
+
+ridge_tune_res <- tune_grid(
+  ridge_wf, 
+  resamples = rent_fold, 
+  grid = ridge_grid
+)
+```
+
+We can see that the both rmse and r-square don't change too much when penalty increases. When penalty becomes larger than 1e+03, rmse increases suddenly as the penalty increases, and r-square decreases suddenly as the penalty decreases.
+
+```{r}
+autoplot(ridge_tune_res)
+```
+
+The Ridge Regression has the lowest rmse = 7634.761 when `penalty` is smaller than 5.994843e+02.
+```{r}
+ridge_metrics <- collect_metrics(ridge_tune_res) %>%
+  filter(.metric=='rmse') %>%
+  arrange(mean)
+ridge_metrics
+```
+
+The Ridge Regression has the highest r-square = 0.6912804 when `penalty` is smaller than 5.994843e+02.
+```{r}
+ridge_metrics_rsq <- collect_metrics(ridge_tune_res) %>%
+  filter(.metric=='rsq') %>%
+  arrange(desc(mean))
+ridge_metrics_rsq
+```
+
+## Random Forest
+
+Next we fit the Random Forest. We will tune the hyperparameter `mtry` in range c(1, 10) since there are 10 predictors in total in the data set and `trees` in range c(10, 1000) with 10 levels.
+```{r}
+rf_spec <- rand_forest(mtry = tune(), trees = tune()) %>%
+  set_engine("randomForest", importance = TRUE) %>%
+  set_mode("regression")
+
+rf_wf <- workflow() %>% 
+  add_recipe(rent_recipe) %>% 
+  add_model(rf_spec)
+
+rf_grid <- grid_regular(mtry(range = c(1, 10)), trees(range = c(10, 1000)), levels = 10)
+```
+
+```{r, eval = FALSE}
+rf_tune_res <- tune_grid(
+  rf_wf, 
+  resamples = rent_fold, 
+  grid = rf_grid
+)
+```
+
+
+We can see that at the beginning, rmse decreases as `mtry`increases and r-square increases as `mtry` increases. When `mtry` is larger than 5, both rmse and r-square don't change too much as `mtry` increases. We can also notice that when the number of trees is 10, the model behaves the poorest. The trend of rmse and r-square are similar for the other number of trees.
+
+```{r}
+autoplot(rf_tune_res)
+```
+
+The Random Forest has the lowest rmse = 6892.307 when there are 890 trees and `mtry` = 6.
+```{r}
+rf_metrics <- collect_metrics(rf_tune_res) %>%
+  filter(.metric=='rmse') %>%
+  arrange(mean) %>% 
+  head()
+rf_metrics
+```
+
+The Random Forest has the highest r-square = 0.7479262 when there are 890 trees and `mtry` = 6.
+```{r}
+rf_metrics_rsq <- collect_metrics(rf_tune_res) %>%
+  filter(.metric=='rsq') %>%
+  arrange(desc(mean)) %>% 
+  head()
+rf_metrics_rsq
+```
+
+## Lasso Regression
+
+Finally, we fit the Lasso Regression. We will tune the hyperparameter `penalty` in range c(-2, 2) with 10 levels.
+```{r, eval = FALSE}
+lasso_spec <- 
+  linear_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet") 
+
+lasso_wf <- workflow() %>% 
+  add_recipe(rent_recipe) %>% 
+  add_model(lasso_spec)
+
+lasso_grid <- grid_regular(penalty(range = c(-2, 2)), levels = 10)
+
+lasso_tune_res <- tune_grid(
+  lasso_wf,
+  resamples = rent_fold, 
+  grid = lasso_grid
+)
+
+```
+
+
+We can see that the both rmse and r-square don't change too much when penalty increases. When penalty becomes larger than 1e+01, rmse increases suddenly as the penalty increases, and r-square decreases suddenly as the penalty decreases.
+
+```{r}
+autoplot(lasso_tune_res)
+```
+
+The Lasso Regression has the lowest rmse = 7623.605 when `penalty` is smaller than 12.91549665.
+```{r}
+lasso_metrics <- collect_metrics(lasso_tune_res) %>%
+  filter(.metric=='rmse') %>%
+  arrange(mean)
+lasso_metrics
+```
+
+The Lasso Regression has the highest r-square = 0.6917363 when `penalty` is smaller than 12.91549665.
+```{r}
+lasso_metrics_rsq <- collect_metrics(lasso_tune_res) %>%
+  filter(.metric=='rsq') %>%
+  arrange(desc(mean))
+lasso_metrics_rsq
+```
+
+## Final Model Selection and Construction
+
+Now we compare the results from different models and select the best model for the final fit.
+```{r}
+df = rbind(xgboost_metrics[1,c("mean", "std_err")], reg_tree_metrics[1,c("mean", "std_err")], 
+           ridge_metrics[1, c("mean", "std_err")], rf_metrics[1,c("mean", "std_err")],
+           lasso_metrics[1,c("mean", "std_err")])
+df = as.data.frame(df)
+rownames(df) = c("Xgboost", "Decision Tree", "Ridge Regression", "Random Forest", "Lasso Regression") 
+colnames(df) = c('rmse', 'standard error')
+df %>%
+  arrange(rmse)
+```
+```{r}
+df1 = rbind(xgboost_metrics_rsq[1,c("mean", "std_err")], reg_tree_metrics_rsq[1,c("mean", "std_err")], 
+           ridge_metrics_rsq[1, c("mean", "std_err")], rf_metrics_rsq[1,c("mean", "std_err")],
+           lasso_metrics_rsq[1,c("mean", "std_err")])
+df1 = as.data.frame(df1)
+rownames(df1) = c("Xgboost", "Decision Tree", "Ridge Regression", "Random Forest", "Lasso Regression") 
+colnames(df1) = c('rsq', 'standard error')
+df1 %>%
+  arrange(desc(rsq))
+```
+
+We can see that Random Forest has both the lowest rmse and the highest rsq. We will use Random Forest with `mtry`= 6 and 890 trees to fit the testing data.
+```{r}
+set.seed(3440)
+
+rf_best <- select_best(rf_tune_res)
+
+rf_final <- finalize_workflow(rf_wf, rf_best)
+
+rf_final_fit <- fit(rf_final, data = rent_train)
+```
+
+
+We create a tibble to show the predicted rent in the left column and the actual rent in the right column.
+```{r}
+test_res <- predict(rf_final_fit, new_data = rent_test %>% select(-rent))
+test_res <- bind_cols(test_res, rent_test %>% select(rent))
+head(test_res)
+```
+
+Now we calculate the rmse, rsq, and mae of the testing data. We can see that rmse = 6976.625046 and rsq = 0.756371, which are similar to the results fit from training data. The mae is equal to 4835.774176.
+```{r}
+data_metrics <- metric_set(rmse, rsq, mae)
+data_metrics(test_res, truth = rent, estimate = .pred)
+```
+
+
+We plot a scatter plot with the actual rent on the x-axis and the predicted rent on the y-axis. We can see a positive linear relationship between them.
+
+```{r}
+ggplot(test_res, aes(x=rent, y=.pred)) +
+  geom_point(color = "lightblue")
+```
+
+We also plot the the error of the model. We can notice that the distribution of error is similar to normal distribution. Most of the error is still close to zero, and there is some error which is extremely large.
+
+```{r}
+ggplot(test_res, aes(x = .pred-rent)) +
+  geom_histogram(aes(fill = .pred-rent), color="white", fill="lightblue", bins = 80) +
+  labs(x = "error")
+```
+
+Now we use `vip` to plot the importance of different parameters. We can see that "size" is the most important factor when we predict the rent. This makes sense because the larger houses usually have higher rent. The second most important factor is "city_Mumbai", which means whether the house locates in Mumbai or not will greatly influence the rent. This is also reasonable since in the previous EDA part, we have seen that the house rent in Mumbai is generally much higher than the house rent in other five cities. The third most important factor is "point_of_contact_Contact.Owner". Remember also in the EDA part, we have noticed that the houses with "Contact Owner" usually have lower rent than the houses with "Contact Agent".
+
+```{r}
+rf_final_fit%>%
+  pull_workflow_fit()%>%
+  vip(aesthetics = list(color = "white", fill = "lightblue"))
+  
+```
+
+
+## Conclusion
+
+The rmse we got for the testing data fits in final model is 6976.625046, which is actually not a very good result, but we still have r-square equals to 0.756371, which means approximately 75% of rent data can be explained by the predictors we used. The best model is Random Forest with `mtry` = 6 and 890 trees. However, the training time for Random Forest is much longer than the other models. It took me around 6 hours to tune Random Forest, while other models except for XGBoost Regression took less than one minute. XGBoost Regression took me aournf 50 minutes to train. Since I tuned two parameters for Random Forest and XGBoost Regression, it indeed should have longer training time, but I am still surprises at how long they take to train. Although the rmse and r-square for Random Forest indeed perform better than other models, we need to consider whether it is worth sacrificing so much time for this improvement.
+
+The house rent can be greatly influenced by the location of house, the status of house, the transportation around the house, and so on. It might also be influenced by some tenants' personal decisions. Also, some outliers and extreme cases will disturb the models. Although we have dropped all the outliers in parameter `rent`, there still have some weird data in the data set. For example, I noticed that there is a house with normal rent value but only have size of 10 square feet, which is not very possible in the real world. But the models can still show the trend of house rent, which are helpful for people to estimate the value of their own house or the house they want to rent.
+
+```{r echo=FALSE, out.width = "30%", fig.align = "center"}
+knitr::include_graphics("end.jpeg")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
